@@ -1,3 +1,16 @@
+"""Lead API tests that require a real, isolated PostgreSQL TEST_DATABASE_URL.
+
+These exercise actual persistence, pagination, filtering, and 404 lookups
+against a live database (see conftest.py's test_engine/db_session fixtures).
+They are skipped if TEST_DATABASE_URL is not configured, and refuse to run
+at all (pytest.exit) if TEST_DATABASE_URL equals DATABASE_URL, since the
+session-scoped test_engine fixture calls Base.metadata.drop_all() at
+teardown.
+
+Pure request-validation tests that never need the endpoint body to execute
+live in test_leads_validation.py instead, using a mocked DB session.
+"""
+
 import uuid
 
 
@@ -11,47 +24,6 @@ def test_create_lead_success(client, lead_payload):
     assert body["id"]
     assert body["created_at"]
     assert body["updated_at"]
-
-
-def test_create_lead_missing_company_name(client, lead_payload):
-    payload = {**lead_payload}
-    del payload["company_name"]
-
-    response = client.post("/api/v1/leads", json=payload)
-
-    assert response.status_code == 422
-
-
-def test_create_lead_blank_company_name(client, lead_payload):
-    payload = {**lead_payload, "company_name": "   "}
-
-    response = client.post("/api/v1/leads", json=payload)
-
-    assert response.status_code == 422
-
-
-def test_create_lead_invalid_email(client, lead_payload):
-    payload = {**lead_payload, "contact_email": "not-an-email"}
-
-    response = client.post("/api/v1/leads", json=payload)
-
-    assert response.status_code == 422
-
-
-def test_create_lead_invalid_website(client, lead_payload):
-    payload = {**lead_payload, "website": "not-a-url"}
-
-    response = client.post("/api/v1/leads", json=payload)
-
-    assert response.status_code == 422
-
-
-def test_create_lead_invalid_status(client, lead_payload):
-    payload = {**lead_payload, "status": "not-a-real-status"}
-
-    response = client.post("/api/v1/leads", json=payload)
-
-    assert response.status_code == 422
 
 
 def test_list_leads_and_pagination(client, lead_payload):
@@ -108,24 +80,6 @@ def test_update_lead_only_supplied_fields(client, lead_payload):
     assert body["industry"] == "Finance"
     assert body["company_name"] == lead_payload["company_name"]
     assert body["contact_email"] == lead_payload["contact_email"]
-
-
-def test_update_lead_rejects_explicit_null_company_name(client, lead_payload):
-    created = client.post("/api/v1/leads", json=lead_payload).json()
-
-    response = client.patch(
-        f"/api/v1/leads/{created['id']}", json={"company_name": None}
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_lead_rejects_explicit_null_status(client, lead_payload):
-    created = client.post("/api/v1/leads", json=lead_payload).json()
-
-    response = client.patch(f"/api/v1/leads/{created['id']}", json={"status": None})
-
-    assert response.status_code == 422
 
 
 def test_update_lead_allows_explicit_null_for_nullable_field(client, lead_payload):

@@ -23,8 +23,9 @@ LEAD_STATUS_ENUM = postgresql.ENUM(*LEAD_STATUS_VALUES, name="lead_status")
 
 def upgrade() -> None:
     """Upgrade schema."""
-    LEAD_STATUS_ENUM.create(op.get_bind(), checkfirst=True)
-
+    # op.create_table() below creates the lead_status enum type itself (as
+    # part of creating a column of that type) -- an extra explicit .create()
+    # call here would duplicate it and fail with DuplicateObject.
     op.create_table(
         "leads",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),

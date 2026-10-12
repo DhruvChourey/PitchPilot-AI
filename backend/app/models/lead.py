@@ -34,7 +34,21 @@ class Lead(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[LeadStatus] = mapped_column(
-        Enum(LeadStatus, name="lead_status", native_enum=True),
+        Enum(
+            LeadStatus,
+            name="lead_status",
+            native_enum=True,
+            # SQLAlchemy's Enum defaults to using each Python member's .name
+            # ("NEW", "RESEARCHING", ...) as the database-side value. The
+            # actual Postgres enum (created by the Alembic migration, with
+            # explicit lowercase literals) only has the .value strings
+            # ("new", "researching", ...). Without values_callable, any
+            # INSERT/UPDATE sends the uppercase .name and Postgres rejects
+            # it with "invalid input value for enum lead_status" -- this
+            # mismatch was latent and undetected until the first real
+            # create_all()/insert against a live database surfaced it.
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
         nullable=False,
         default=LeadStatus.NEW,
         server_default=LeadStatus.NEW.value,

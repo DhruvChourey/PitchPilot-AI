@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +9,10 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
+
+
+TEST_SCHEMA = "pitchpilot_test"
+assert TEST_SCHEMA != "public"  # guard against a copy-paste mistake
 
 
 def _require_test_database_url() -> str:
@@ -36,9 +41,20 @@ def _require_test_database_url() -> str:
 @pytest.fixture(scope="session")
 def test_engine():
     url = _require_test_database_url()
-    engine = create_engine(url, pool_pre_ping=True)
+    # schema_translate_map rewrites every unqualified (schema=None) table/
+    # type in our models to TEST_SCHEMA at SQL-compile time -- not a
+    # session-level `SET search_path`, so it's immune to connection-pooling
+    # state leaking across requests. This is the soft (application-level)
+    # isolation layer; the hard layer is the pitchpilot_test_runner
+    # Postgres role itself having no privileges on `public` at all (see
+    # README.md's Supabase test-schema section).
+    engine = create_engine(url, pool_pre_ping=True).execution_options(
+        schema_translate_map={None: TEST_SCHEMA}
+    )
     Base.metadata.create_all(bind=engine)
     yield engine
+    # Scoped to TEST_SCHEMA via the same schema_translate_map -- only drops
+    # tables declared in Base.metadata, never a bare DROP SCHEMA/CASCADE.
     Base.metadata.drop_all(bind=engine)
     engine.dispose()
 
@@ -65,6 +81,28 @@ def client(db_session):
             yield db_session
         finally:
             pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def mock_client():
+    """TestClient with a MagicMock standing in for the DB session.
+
+    Never opens a network connection -- safe to use for any test where the
+    expected behavior (a Pydantic validation 422) happens before the
+    endpoint body would touch the database at all. Do not use this for
+    anything that needs the database to actually respond realistically
+    (e.g. a 404-on-missing-row lookup) -- that belongs in the real-Postgres
+    suite instead, to avoid tests passing against mock behavior that drifts
+    from what Postgres actually does.
+    """
+
+    def override_get_db():
+        yield MagicMock()
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
