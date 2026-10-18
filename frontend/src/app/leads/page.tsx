@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState, useTransition } from "react";
 import { ApiError, listLeads, type Lead, type LeadStatus, LEAD_STATUSES } from "@/lib/api";
+import { useRedirectOnUnauthorized } from "@/lib/auth";
 import StatusBadge from "@/components/StatusBadge";
 import Reveal from "@/components/Reveal";
 
@@ -29,6 +30,7 @@ export default function LeadsPage() {
   // list stays visible while a new page/filter loads, which also reads
   // better than a full-page flash on every click.
   const [isPending, startTransition] = useTransition();
+  const redirectOnUnauthorized = useRedirectOnUnauthorized();
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -61,12 +63,13 @@ export default function LeadsPage() {
         }
       } catch (err) {
         if (controller.signal.aborted) return;
+        if (redirectOnUnauthorized(err)) return; // session expired mid-visit -- off to /login, not an error banner
         setErrorMessage(err instanceof ApiError ? err.message : "Failed to load leads.");
       }
     });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- overallTotal intentionally excluded: it's a cache, not a trigger.
-  }, [page, statusFilter, startTransition]);
+  }, [page, statusFilter, startTransition, redirectOnUnauthorized]);
 
   function handleStatusFilterChange(value: string) {
     setStatusFilter(value as LeadStatus | "");

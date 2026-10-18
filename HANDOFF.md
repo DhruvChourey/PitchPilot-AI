@@ -1,6 +1,6 @@
 # Handoff — Current Verified State
 
-**As of:** 2026-10-18 (updated after implementing Checkpoint 4 — CSRF protection and auth rate limiting)
+**As of:** 2026-10-18 (updated after completing Checkpoint 5 — frontend authentication and lead integration)
 **Repository:** `D:\leadtoclients\`
 
 This document separates four categories of information:
@@ -122,6 +122,45 @@ Each route below was actually opened in a real browser (Claude in Chrome) agains
 - **RLS is enabled on `public.leads` with zero policies.** This is intentionally minimal — it denies all access to non-owner roles (`anon`, `authenticated`, `service_role`) by default, without needing to define any policy. Do not casually add RLS policies, change the existing grants, enable `FORCE ROW LEVEL SECURITY`, or change Supabase API settings without a separate, explicit review — each of those has different blast-radius implications that haven't been evaluated.
 - **The backend connects as `postgres`, the table owner, which bypasses RLS by default** (confirmed via a live INSERT/SELECT sanity check after the RLS migration was applied, in the prior session). This means RLS currently protects against the Data API / other non-`postgres` connections, but does **not** provide any application-level authorization — the FastAPI backend's own endpoints have no auth/authorization layer at all yet. Do not treat RLS as a substitute for that.
 - **Never include credentials or secrets in documentation, commit messages, or chat.** Refer to environment variable names only (`DATABASE_URL`, `TEST_DATABASE_URL`, `BACKEND_CORS_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`) — never their values. This document contains none.
+
+## Checkpoint 5 of 6 — Frontend authentication and lead integration (2026-10-18)
+
+Implemented across five approved stages (A: discovery, B: API client, C: auth UI/state, D: lead-page integration, E: this verification pass). No backend code, database schema, migrations, production roles, or production settings were touched at any stage. Nothing staged, committed, or pushed.
+
+**Stage B — `frontend/src/lib/api.ts` (typed API client additions):**
+- New functions: `fetchCsrfToken()`, `register()`, `login()`, `logout()`, `me()`, plus a `User` type mirroring the backend's `UserRead`.
+- A shared `apiFetch`/`apiRequest` helper now backs *every* call in the file (including the three pre-existing lead functions) — `credentials: "include"` on all of them, and an `X-CSRF-Token` header (read from whichever cookie is correct for that call — `csrf_preauth` for register/login, `csrf_token` for lead mutations and logout) on the mutating ones only.
+- Cookie reading is confined to the two cookies the backend deliberately left non-HttpOnly (`csrf_token`, `csrf_preauth`); `session_id` (HttpOnly) is never read from JavaScript — it can't be, and nothing in this codebase tries.
+
+**Stage C — `frontend/src/lib/auth.tsx`, `components/RequireAuth.tsx`, `components/AuthForm.tsx`, `app/login/page.tsx`, `app/register/page.tsx`, `app/leads/layout.tsx`:**
+- `AuthProvider`/`useAuth`: the only source of truth for "is anyone logged in" is one real `GET /api/v1/auth/me` call on mount (`loading` → `authenticated`/`unauthenticated`, never a client-side boolean, never `localStorage`/`sessionStorage`).
+- `register()` auto-chains into `login()` with the same credentials, since the backend's `/register` doesn't start a session by itself; a failure in that second step surfaces a friendly "account created, please log in" message rather than a false "you're in" state.
+- `RequireAuth` wraps the whole `/leads` subtree via `app/leads/layout.tsx`: shows a loading row while `/me` is in flight, renders **nothing** (not the protected page, not even briefly) while unauthenticated — the redirect to `/login` happens in an effect, so there's no frame where protected content could flash before it fires.
+- `Sidebar.tsx` shows the logged-in user's email + a Log out button, or a Log in link, based on the same shared auth state.
+
+**Stage D — `app/leads/page.tsx`, `app/leads/new/page.tsx`, `app/leads/[id]/LeadDetailClient.tsx`, plus a new `useRedirectOnUnauthorized()` hook in `lib/auth.tsx`:**
+- The three lead pages already called the (now credentialed/CSRF-aware) functions from `api.ts` unchanged — Stage D's actual gap, found by re-reading all three pages rather than assuming: none of them specially handled a **401 arriving mid-visit** (a session expiring while already on a protected page), which would otherwise show a generic "failed to load" banner instead of sending the person back to `/login`. `useRedirectOnUnauthorized()` fixes this once, reused across all three pages' catch blocks, instead of three different ad-hoc checks.
+- Existing pagination, status filtering, loading/empty/error states, and the shared `LeadForm` component were all preserved untouched.
+
+**Stage E (this pass) — gap review, final checks, documentation:**
+- Reviewed the Sidebar, `RequireAuth`, and auth context once more for anything missed: found nothing blocking. One minor, non-security UX note: the Sidebar's "Dashboard"/"Leads" nav links are always visible regardless of auth state (clicking "Leads" while logged out still correctly redirects via `RequireAuth` — nothing is exposed — it's just not hidden proactively). Not fixed this stage; cosmetic only.
+- **Frontend checks, run fresh just now:**
+  - `npx vitest run` → **48 passed, 0 failed** (17 API-client + 6 auth-context + 3 RequireAuth + 4 login-page + 3 register-page + 3 new-lead-page + 8 lead-detail + 4 leads-list)
+  - `npm run lint` → clean
+  - `npx tsc --noEmit` → clean
+  - `npm run build` → succeeded; all 7 routes (`/`, `/leads`, `/leads/[id]`, `/leads/new`, `/login`, `/register`, plus `/_not-found`) compiled and prerendered
+  - `npm audit` → **unchanged from Stage B/C: 10 vulnerabilities (3 moderate, 6 high, 1 critical)**. The critical is `vitest`/`@vitest/mocker` via `vite`, fixed only in `vitest@4.1.11+` (requires `vite@6.4.3+`, incompatible with this project's `vitest@2.1.9`/`@types/node@^20` without a major version bump not attempted here). Its actual trigger condition ("when the Vitest UI server is listening") doesn't apply to how this project runs tests (`vitest run`, never `--ui`). Not suppressed, not fixed with `--force` — carried forward as a known, bounded, documented risk.
+- **Backend suite re-run (read-only, to confirm the contract this frontend work targets hasn't drifted):** `uv run pytest` → **76 passed, 0 failed**, unchanged. No backend files were modified at any point in Checkpoint 5.
+- **Verified against the real running backend, not only mocks (done during Stage D, re-confirmed intact here):** a temporary backend process was pointed at the isolated `pitchpilot_test` schema/role (never `DATABASE_URL`/production) to run an actual register → login → create/list/get/update/archive-lead flow end-to-end with real cookies and the real `X-CSRF-Token` header, plus two negative checks (missing CSRF header → `403`; logout without a valid CSRF token → `403`). The temporary schema was torn down and the process stopped immediately after. Production re-verified immediately afterward: `alembic_version` unchanged at `92142a5684c8`, `public.leads` still 0 rows, `public` schema contains only `alembic_version`/`leads` (no `users`/`sessions` table was ever migrated there).
+
+**Explicitly NOT claimed — production readiness remains blocked on work outside this checkpoint's scope:**
+1. **Production still connects as the RLS-bypassing `postgres` role.** The restricted `pitchpilot_app` runtime role and its RLS policy are authored (migration `b2b5b3f0c716`) but never applied — this frontend work changes nothing about that.
+2. **No production auth migration has been run.** `public` contains only `alembic_version`/`leads` — `users`/`sessions` (and the `leads.owner_id`/RLS-policy migrations from Checkpoints 2–3) exist only in the `pitchpilot_test` schema. Until those are applied to production (a separate, explicitly-scoped future decision per every prior checkpoint's own notes), the real production database cannot actually serve this authentication flow at all.
+3. **Production database security setup (role separation, RLS enforcement) is incomplete** — see Checkpoint 3's and 4's entries above; nothing in Checkpoint 5 changes that status.
+4. **In-memory rate limiting is still not multi-instance-safe** (Checkpoint 4) — unaffected by this checkpoint, still a prerequisite before horizontal scaling.
+5. **One critical npm audit finding remains open** in frontend dev dependencies (`vitest`/`vite`, not runtime/production code) — documented above, not fixed.
+
+**Exact next step:** Checkpoint 5 is complete and verified against both the real backend (via the isolated test schema) and the full frontend/backend test suites. Do not begin RAG or any further checkpoint without explicit instruction — stopping here per scope.
 
 ## Authentication — Checkpoint 4 of 6 (CSRF protection, auth rate limiting) (2026-10-18)
 

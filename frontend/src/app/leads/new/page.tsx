@@ -3,14 +3,21 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createLead, type LeadFormInput } from "@/lib/api";
+import { useRedirectOnUnauthorized } from "@/lib/auth";
 import LeadForm from "@/components/LeadForm";
 import Reveal from "@/components/Reveal";
 
 export default function NewLeadPage() {
   const router = useRouter();
+  const redirectOnUnauthorized = useRedirectOnUnauthorized();
 
   async function handleSubmit(input: LeadFormInput) {
-    await createLead(input);
+    try {
+      await createLead(input);
+    } catch (err) {
+      if (redirectOnUnauthorized(err)) return; // session expired mid-visit -- off to /login instead of a form error
+      throw err; // let LeadForm's own catch show field/validation errors as usual
+    }
     router.push("/leads");
   }
 

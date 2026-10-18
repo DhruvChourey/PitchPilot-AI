@@ -7,6 +7,7 @@ import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { DURATION, EASE, prefersReducedMotion } from "@/lib/motion";
 import { useLocalStorageBoolean } from "@/lib/useLocalStorageBoolean";
+import { useAuth } from "@/lib/auth";
 
 const NAV_ITEMS = [
   { href: "/", label: "Dashboard", icon: HomeIcon },
@@ -19,8 +20,24 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useLocalStorageBoolean(STORAGE_KEY, false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const navRef = useRef<HTMLElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const { status, user, logout } = useAuth();
+
+  async function handleLogout() {
+    if (loggingOut) return; // prevent a double click firing two logout calls
+    setLoggingOut(true);
+    try {
+      await logout();
+      // No explicit navigation here: if the current page requires auth,
+      // RequireAuth's own effect (watching the same auth state) redirects
+      // to /login on its own once status flips -- one place owns that
+      // redirect, not two.
+    } finally {
+      setLoggingOut(false);
+    }
+  }
 
   function toggleCollapsed() {
     setCollapsed(!collapsed);
@@ -88,6 +105,40 @@ export default function Sidebar() {
           );
         })}
       </nav>
+
+      {status === "authenticated" && user && (
+        <div className="border-t border-border px-3 py-3">
+          <div className={`mb-2 truncate text-xs text-text-faint ${collapsed ? "md:hidden" : ""}`} title={user.email}>
+            {user.email}
+          </div>
+          <button
+            type="button"
+            onClick={handleLogout}
+            disabled={loggingOut}
+            title={collapsed ? "Log out" : undefined}
+            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 ${
+              collapsed ? "md:justify-center" : ""
+            }`}
+          >
+            <LogoutIcon className="h-[18px] w-[18px] shrink-0 text-text-faint" />
+            <span className={collapsed ? "md:hidden" : ""}>{loggingOut ? "Logging out..." : "Log out"}</span>
+          </button>
+        </div>
+      )}
+
+      {status === "unauthenticated" && (
+        <div className="border-t border-border px-3 py-3">
+          <Link
+            href="/login"
+            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-2 hover:text-text ${
+              collapsed ? "md:justify-center" : ""
+            }`}
+          >
+            <LogoutIcon className="h-[18px] w-[18px] shrink-0 text-text-faint" />
+            <span className={collapsed ? "md:hidden" : ""}>Log in</span>
+          </Link>
+        </div>
+      )}
 
       <div className="border-t border-border px-3 py-3">
         <button
@@ -180,6 +231,20 @@ function LeadsIcon({ className }: { className?: string }) {
       <rect x="4" y="5" width="16" height="4" rx="1" stroke="currentColor" strokeWidth="1.6" />
       <rect x="4" y="11" width="16" height="4" rx="1" stroke="currentColor" strokeWidth="1.6" />
       <rect x="4" y="17" width="10" height="2.4" rx="1" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function LogoutIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

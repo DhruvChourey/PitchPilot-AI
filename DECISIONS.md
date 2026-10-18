@@ -495,3 +495,37 @@ Current thresholds: login — 10/minute per IP, 5/5 minutes per email; register 
 **Known, accepted-for-now limitation — NOT claimed to be production-sufficient:** this state is a plain in-process dict. Running more than one backend instance means each instance enforces independent counters — an attacker spread across N instances effectively gets `limit × N`. A shared backend (Redis, via a `limits`-style `redis://` storage, or equivalent) is required before horizontal scaling becomes safe. Not implemented here because no such infrastructure is provisioned for this project yet; this is a deployment prerequisite to resolve before going multi-instance, not an oversight.
 
 **Status:** Implemented for login/register only, as scoped. Deterministic tests cover per-IP threshold/429, per-email threshold/429, independence between the two keys, and window-reset-without-permanent-lockout behavior — see `backend/tests/test_rate_limit.py`.
+
+---
+
+## Checkpoint 5 — frontend auth state lives in one React context backed by a single real `/me` call, never a client-side boolean
+
+**Decision:** `frontend/src/lib/auth.tsx`'s `AuthProvider` is the only place that knows "is anyone logged in." It starts in a `"loading"` state and calls `GET /api/v1/auth/me` exactly once on mount; a `200` becomes `"authenticated"` (with the returned user), a `401` becomes `"unauthenticated"`. There is no separate `isLoggedIn` flag anywhere, and nothing is ever written to `localStorage`/`sessionStorage` — not a token, not a boolean, not the user object.
+
+**Why not a persisted boolean ("remember login across reloads locally"):** a client-side flag can drift from reality (the HttpOnly session cookie could have expired, been revoked server-side, or never existed if `localStorage` was copied/tampered with) and would then either show stale "logged in" UI against a session that's actually dead, or require its own invalidation logic that duplicates what the cookie+backend already do correctly. The actual session lives in an HttpOnly cookie the frontend can't read anyway — so the frontend's job is only to *ask* the backend, not to *remember* the answer longer than one page load's worth of trust.
+
+## `RequireAuth` renders nothing (not a spinner, not the page) while unauthenticated — the redirect is a side effect, not the render
+
+**Decision:** `frontend/src/components/RequireAuth.tsx` has three branches: `"loading"` → a loading row; `"unauthenticated"` → `return null`, with the actual `router.replace("/login")` call happening in a `useEffect` watching that same status; `"authenticated"` → render the real children.
+
+**Why this specific split, not "redirect inline during render":** calling `router.replace()` directly in the render path is a side effect during render, which React (and Next.js's own rules) disallow doing reliably — it has to happen in an effect, which necessarily runs *after* the render it was triggered by. If that render showed the protected `children` while `status === "unauthenticated"`, there would be one visible frame of a logged-out user seeing a logged-in page's content before the redirect fires. Returning `null` for that status removes that frame entirely — there's nothing to flash, regardless of how fast or slow the effect's `router.replace()` call resolves.
+
+## Registration auto-chains into login, because the backend's `/register` doesn't start a session
+
+**Decision:** `AuthProvider.register()` calls `apiRegister()` then immediately `apiLogin()` with the same credentials, rather than just calling `apiRegister()` and leaving the person on a "registered, now go log in" screen.
+
+**Why:** confirmed by reading `backend/app/api/v1/auth.py`'s `register` route — it creates the `User` row and returns `201`, but never calls `create_session`/sets any cookie. Treating "create an account" as two separate user-facing steps (fill form → separately log in) would be correct but needlessly friction-y for what the backend itself treats as adjacent operations. If the automatic login step fails (e.g. a rate limit happens to trip in that exact window), the account still exists — `register()` surfaces a distinct, honest message ("account was created, please log in") rather than either silently failing or claiming a session that doesn't exist.
+
+## A single `useRedirectOnUnauthorized()` hook, not three separate 401 checks, for session-expires-mid-visit
+
+**Decision:** `frontend/src/lib/auth.tsx` exports `useRedirectOnUnauthorized()`, called from the catch blocks in `leads/page.tsx`, `leads/new/page.tsx`, and `leads/[id]/LeadDetailClient.tsx`. It checks `err instanceof ApiError && err.status === 401`; if so, it flips the shared auth context straight to `"unauthenticated"` (no extra network call — the 401 already told us the session is gone) and calls `router.replace("/login")`, returning `true` so the caller skips setting its own generic error message.
+
+**Why this needed its own mechanism, distinct from `RequireAuth`:** `RequireAuth` only runs its check once, when a protected page is first entered — it has no way to know if the session cookie expires *while the person is still sitting on that page* (e.g. a long-idle tab, then a page interaction). Without this hook, that scenario would have shown a misleading "Failed to load leads" / "Failed to update status" banner instead of correctly recognizing "you're not logged in anymore." Centralizing it in one hook (rather than writing the same `if (err.status === 401)` branch three times slightly differently) means the behavior is identical everywhere it's needed and only has to be gotten right once.
+
+## Frontend test stack: Vitest + React Testing Library, added in two small steps, not all at once
+
+**Decision:** Stage B added only `vitest` (plus a `tinypool` override for a real, verified vulnerability fix — see the npm audit note in `HANDOFF.md`) for plain API-client unit tests. Stage C added `jsdom` and `@testing-library/react` only once component rendering was actually needed. No test-framework dependency was added speculatively ahead of being used.
+
+**Why the `tinypool` override was trusted, not just "it installed":** before keeping it, the exact option names `vitest@2.1.9` passes to `Tinypool`'s constructor (`runtime`, `maxThreads`, `minThreads`, `isolateWorkers`, `concurrentTasksPerWorker`, `terminateTimeout`) were checked against `tinypool@2.2.0`'s own `dist/index.d.ts` — all still present and typed identically — and the full suite was run under *both* of tinypool's runtime backends (`--pool=threads` and the default `forks`) to exercise both code paths, not just the default. This is recorded here because "the install succeeded" was explicitly called out as insufficient evidence earlier in this project, correctly.
+
+**Remaining open npm audit finding, deliberately not force-fixed:** `vitest@2.1.9` (and its `vite@5.4.21`) has one critical finding (`GHSA-5xrq-8626-4rwp`/`GHSA-82fw-gwwq-j7x9`, arbitrary file read "when the Vitest UI server is listening") with no non-major fix available — `vitest@4.1.11+` requires `vite@6.4.3+`, which conflicts with `vitest@2.1.9`'s own `vite: ^5.0.0` dependency declaration. This project's test command (`vitest run`) never starts the UI server the advisory's trigger condition requires, which bounds the real-world risk, but the finding itself remains open in the dependency tree — not suppressed, not worked around with `--force`.

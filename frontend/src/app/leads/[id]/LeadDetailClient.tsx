@@ -13,6 +13,7 @@ import {
   type LeadStatus,
   LEAD_STATUSES,
 } from "@/lib/api";
+import { useRedirectOnUnauthorized } from "@/lib/auth";
 import LeadForm from "@/components/LeadForm";
 import StatusBadge from "@/components/StatusBadge";
 import Reveal from "@/components/Reveal";
@@ -41,6 +42,7 @@ export default function LeadDetailClient({ id: leadId }: { id: string }) {
   const [statusSaving, setStatusSaving] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const redirectOnUnauthorized = useRedirectOnUnauthorized();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,6 +54,7 @@ export default function LeadDetailClient({ id: leadId }: { id: string }) {
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
+        if (redirectOnUnauthorized(err)) return; // session expired mid-visit -- off to /login, not an error screen
         if (err instanceof ApiError && err.status === 404) {
           setState("not_found");
           return;
@@ -60,12 +63,17 @@ export default function LeadDetailClient({ id: leadId }: { id: string }) {
         setState("error");
       });
     return () => controller.abort();
-  }, [leadId]);
+  }, [leadId, redirectOnUnauthorized]);
 
   async function handleSubmit(input: LeadFormInput) {
-    const updated = await updateLead(leadId, input, status);
-    setLead(updated);
-    setFeedback("Changes saved.");
+    try {
+      const updated = await updateLead(leadId, input, status);
+      setLead(updated);
+      setFeedback("Changes saved.");
+    } catch (err) {
+      if (redirectOnUnauthorized(err)) return;
+      throw err; // let LeadForm's own catch show field/validation errors as usual
+    }
   }
 
   async function handleStatusChange(newStatus: LeadStatus) {
@@ -79,6 +87,7 @@ export default function LeadDetailClient({ id: leadId }: { id: string }) {
       setFeedback("Status updated.");
     } catch (err) {
       setStatus(lead.status); // revert on failure, don't leave UI out of sync
+      if (redirectOnUnauthorized(err)) return;
       setErrorMessage(
         err instanceof ApiError ? err.message : "Failed to update status."
       );
@@ -99,6 +108,7 @@ export default function LeadDetailClient({ id: leadId }: { id: string }) {
       await archiveLead(leadId);
       router.push("/leads");
     } catch (err) {
+      if (redirectOnUnauthorized(err)) return;
       setErrorMessage(err instanceof ApiError ? err.message : "Failed to archive lead.");
       setArchiving(false);
     }
