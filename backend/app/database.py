@@ -22,9 +22,21 @@ def get_engine() -> Engine:
 
 
 def get_db() -> Generator[Session, None, None]:
-    session_factory = sessionmaker(bind=get_engine(), autoflush=False, autocommit=False)
+    # expire_on_commit=False: see DECISIONS.md's "Mutating routes read
+    # server-generated columns from the same transaction that writes them"
+    # entry. In short: SQLAlchemy's default (True) would make any
+    # attribute access on a just-committed ORM object (e.g. FastAPI/
+    # Pydantic serializing the response) trigger an implicit SELECT in a
+    # brand-new transaction -- which is exactly the bug this fixes, since
+    # the RLS GUC is transaction-scoped and has already cleared by then.
+    session_factory = sessionmaker(
+        bind=get_engine(), autoflush=False, autocommit=False, expire_on_commit=False
+    )
     db = session_factory()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()

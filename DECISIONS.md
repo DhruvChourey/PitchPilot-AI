@@ -8,6 +8,154 @@ revisit it rather than treating it as fixed.
 
 ---
 
+## Premium dark theme is a fixed default, not `prefers-color-scheme`-driven
+
+**Decision:** `globals.css` sets dark design tokens directly on `:root`
+(no light-mode branch, no `@media (prefers-color-scheme: dark)`), rather
+than the Phase 2 approach of light-by-default with `dark:` Tailwind
+variants sprinkled through every component.
+
+**Why:** The brief asked for a deliberate "premium, modern AI SaaS"
+dark identity (comparable to Linear, Vercel, Raycast), not a theme that
+happens to go dark when the OS prefers it. A fixed theme also halves
+the class list on every component (no more parallel light/dark variants
+of every color utility) and guarantees the accent gradient, status
+badges, and card surfaces always render as designed, regardless of the
+viewer's OS setting.
+
+**Tradeoff accepted:** there's currently no light-mode option at all,
+and no user-facing theme toggle. If that's wanted later, it's a
+deliberate follow-up, not an oversight.
+
+**Status:** Decided and implemented.
+
+---
+
+## Create/edit forms are a styled "panel", not a true modal or intercepting route
+
+**Decision:** `/leads/new` and `/leads/[id]` remain full page routes
+(as built in Phase 2), now styled as a centered card with rounded
+corners, a drop shadow, and a GSAP fade+rise entrance — not converted
+to an actual modal overlay or a Next.js intercepting route.
+
+**Why:** The brief asked to animate the creation/edit "form modal or
+drawer... when it opens and closes," which read as a request for that
+*visual treatment*, not necessarily a literal modal architecture. Full
+page routes keep the existing, already-tested navigation model intact
+(shareable/bookmarkable edit URLs, working browser back button, no new
+routing complexity) — directly serving the instruction to preserve
+existing working functionality and make minimal, scoped changes. A true
+modal/intercepting-route implementation is a larger, riskier
+restructure that wasn't asked for explicitly enough to justify
+reopening already-verified navigation behavior.
+
+**Status:** Decided and implemented. Revisit only if a real modal
+(e.g. create-without-leaving-the-list) is explicitly requested later.
+
+---
+
+## GSAP integration: `@gsap/react`'s `useGSAP` + a shared `Reveal` wrapper, not ad hoc `useEffect`
+
+**Decision:** Installed the official `@gsap/react` package for its
+`useGSAP()` hook, and built one reusable component (`Reveal.tsx`) that
+every page's entrance animation goes through, rather than writing
+`useEffect` + manual `gsap.context()`/`ctx.revert()` in each component.
+
+**Why:** `useGSAP`'s `scope` option automatically reverts animations on
+unmount (and handles React Strict Mode's double-invoke in development
+correctly) — doing this by hand in every component is exactly the kind
+of boilerplate that leads to memory leaks or animations conflicting
+with React's own DOM updates, which the brief explicitly warned against.
+Centralizing it in `Reveal` also means the `prefers-reduced-motion`
+check (`lib/motion.ts`) and timing/easing constants live in one place,
+not copy-pasted and potentially drifting across pages.
+
+**Status:** Decided and implemented, used by the homepage, leads list
+(including a second, independently re-triggerable stagger for the row
+list), and both the create and edit panels.
+
+---
+
+## Next.js 16 dynamic routes: Server Component wrapper + `instant = false`, not `useParams()`
+
+**Decision:** For `/leads/[id]`, `page.tsx` is an async Server Component
+that awaits `params` and renders a Client Component (`LeadDetailClient.tsx`)
+with `id` passed as a prop — rather than having the page itself be a
+Client Component calling `useParams()`.
+
+**Why:** Next.js 16 ships `cacheComponents` ("instant navigation"
+validation) on by default. `useParams()` in a Client Component blocks
+prerendering and can't be fixed with `export const instant = false`
+(that export throws if used in a Client Component at all). Accessing
+route `params` in a Server Component hits the same validation, but can
+be explicitly opted out there. Since `/leads/[id]` always fetches a
+specific record at runtime — there's no static shell to prerender — the
+correct fix is `export const instant = false` on the Server Component
+page, not fighting the framework with Suspense boundaries that don't fit
+a single-record detail view.
+
+**Applies to:** any future dynamic route (`[id]`, `[slug]`, etc.) added
+to this frontend. Follow this same split, not `useParams()`.
+
+**Status:** Decided and implemented, verified via `npm run build` actually
+failing first, then succeeding after the fix (not assumed).
+
+---
+
+## List/filtered data fetching in effects: `useTransition` Actions, not manual loading state
+
+**Decision:** `frontend/src/app/leads/page.tsx` uses React 19's
+`useTransition` with an async function passed to `startTransition`
+("Actions") to drive its loading state, rather than a manually-managed
+`useState<"loading"|"loaded"|"error">`.
+
+**Why:** `eslint-plugin-react-hooks`'s `set-state-in-effect` rule (new in
+the version pulled in by Next.js 16) flags a synchronous `setState`
+call at the top of a `useEffect` body — the natural way to reset to
+"loading" before a refetch on page/filter change. `useTransition`'s
+`isPending` is the React-sanctioned replacement: it doesn't trigger the
+lint rule, and as a side benefit the previous list stays visible while
+a new page/filter loads (no loading-flash on every click), rather than
+being a strictly mechanical lint-silencing workaround.
+
+**Applies to:** any future component that re-fetches data in an effect
+keyed on changing dependencies (pagination, filters, search). Reach for
+this pattern instead of a manual loading boolean.
+
+**Status:** Decided and implemented.
+
+---
+
+## Manual browser QA against the test schema, via a temporary env override
+
+**Decision:** When manually browser-testing the lead UI (Phase 2), the
+dev backend was launched with `DATABASE_URL` temporarily overridden via
+a process-scoped environment variable (never written to `backend/.env`)
+to the `pitchpilot_test_runner` connection string, instead of the real
+`DATABASE_URL`.
+
+**Why:** The app's normal runtime code (`app/database.py`) has no
+schema-translation logic — it relies on whatever `DATABASE_URL` points
+to. Browser-clicking through create/edit flows against the real
+`DATABASE_URL` would have written real (fake) lead records into
+`public.leads`, and the API has no hard-delete endpoint, so that data
+would persist permanently. Because `pitchpilot_test_runner`'s Postgres
+`search_path` is already pinned server-side to `pitchpilot_test` (see
+the dedicated-test-schema decision above), simply connecting as that
+role for one dev-server process was sufficient — zero application code
+changes needed, and `public.leads`'s row count was verified at `0` both
+before and after the browser session.
+
+**Applies to:** any future manual/exploratory browser testing that would
+otherwise write data through the real backend. Prefer this pattern over
+either touching production or adding test-mode branching to app code.
+
+**Status:** One-off technique used for Phase 2 verification, not a
+standing dev-server configuration — `backend/.env`'s actual
+`DATABASE_URL` was never changed.
+
+---
+
 ## Database: Supabase-hosted PostgreSQL, not local Postgres or Docker
 
 **Decision:** Use Supabase as the primary (`DATABASE_URL`) database,
@@ -187,3 +335,124 @@ command that might touch a real connection string.
 
 **Status:** Ongoing practice, not a one-time fix — apply this reasoning
 to any future credential-generating step.
+
+---
+
+## RLS via a custom GUC (`app.current_user_id`) is defense-in-depth against app bugs, NOT a security boundary against SQL injection or arbitrary SQL execution
+
+**Decision:** Lead ownership is enforced twice, independently: once in
+FastAPI (`owner_id` filtering already present from Checkpoint 2) and
+again at the database level via Postgres Row-Level Security, using a
+custom session GUC (`app.current_user_id`) that the app sets once per
+request in `get_current_user` (`app/core/rls.py`), read by the RLS
+policy's `USING`/`WITH CHECK` clauses via `current_setting(...)::uuid`.
+
+**Why this does NOT protect against SQL injection or arbitrary SQL
+execution, stated explicitly before implementation (per your
+requirement) and still true after implementation:** a custom GUC like
+`app.current_user_id` is just a regular session variable. Any SQL
+statement that runs *as* the `pitchpilot_app` (production) /
+`pitchpilot_test_app` (test) role can call
+`set_config('app.current_user_id', '<any-uuid>', ...)` itself and set it
+to *any* value, including another user's id — there is nothing
+preventing the role from forging it. The only way to make a custom GUC
+genuinely un-settable by the connecting role is to register it from a
+compiled C extension with `PGC_SUSET` (or stricter) context, which
+requires `shared_preload_libraries` — not available on Supabase's
+managed Postgres, and not attempted here. Concretely:
+- If an attacker achieves arbitrary SQL execution as the app role (e.g.
+  via a SQL injection bug elsewhere in the app), they can simply call
+  `set_config('app.current_user_id', '<victim-uuid>', false)` and then
+  read/write that victim's leads — RLS does not stop this, because the
+  GUC itself is the attacker's own input at that point.
+- What this design *does* protect against: a FastAPI code-level mistake
+  — a forgotten `owner_id` filter, a new route that skips the ownership
+  check added in Checkpoint 2, a future refactor that drops a `WHERE`
+  clause. Even if the application code's own filtering is wrong or
+  missing, the database still refuses to return/accept rows that don't
+  match the GUC the *authentication dependency* set for this request.
+  This is the actual, verified property — not a claim that RLS makes
+  the app immune to injection.
+- `users` and `sessions` are **not** RLS-protected by this design. Only
+  `leads` has an owner column and a policy. This was a deliberate scope
+  decision, not an oversight, but it means a code bug that queries
+  `users`/`sessions` without a `WHERE` clause has no database-level
+  backstop the way `leads` queries do.
+
+**Why `set_config(name, value, is_local=true)` instead of `SET LOCAL
+app.current_user_id = <value>`:** `set_config` is a normal SQL function,
+so its `value` argument is passed as a regular bind parameter (`:uid`)
+— no string interpolation of a UUID into SQL text, no injection surface
+on *this* statement. `SET`/`SET LOCAL` are SQL commands, not function
+calls, and don't reliably support parameter binding for their value the
+same way. `is_local=true` gives the same transaction-scoped behavior as
+`SET LOCAL`: the setting is cleared automatically at `COMMIT`/`ROLLBACK`
+rather than persisting for the life of the physical connection — this
+matters because `pitchpilot_app`/`pitchpilot_test_app` is a single
+shared, pooled role used across every user's requests, so a value that
+survived past one transaction could leak into the next request that
+happens to reuse the same pooled connection.
+
+**Verified by direct SQL-level tests (`backend/tests/test_rls.py`),
+independent of the FastAPI app layer, exercising the restricted
+`pitchpilot_test_app` role directly:**
+- Correct context → own row visible; wrong context → zero rows (not an
+  error, not someone else's data).
+- `set_config(..., true)` set and committed in one transaction is
+  **not** visible in a fresh transaction on the same physical
+  connection — the required non-leakage property for a pooled role.
+- A connection that has *never* called `set_config` for this GUC: on
+  this specific Postgres/Supabase setup, `current_setting(..., true)`
+  returns `''` (empty string), **not** SQL `NULL`, which is what
+  textbook Postgres documentation on unset custom GUCs would suggest —
+  confirmed empirically with a disposable brand-new engine with zero
+  prior fixture activity, not assumed. Because the policy casts this
+  value `::uuid`, an empty string fails the cast and the query raises a
+  `DataError` rather than silently returning zero rows or (far worse)
+  all rows. Net effect: forgetting to call `set_rls_user_context` fails
+  *loud* (every leads query 500s) rather than failing open. This is a
+  materially different failure mode than "empty result set" and is
+  recorded precisely for that reason — see `HANDOFF.md`'s unresolved
+  risks for Checkpoint 3.
+- `pitchpilot_test_app` confirmed directly via `pg_roles`/`pg_class`:
+  `rolbypassrls = false` and it does not own the `leads` table — so it
+  cannot bypass RLS the way a table owner (`postgres`/
+  `pitchpilot_test_runner`) automatically does.
+
+**Test/production role separation:** `pitchpilot_test_runner` (owns the
+`pitchpilot_test` schema's tables, used only for schema setup —
+`CREATE TABLE`/`GRANT`/`CREATE POLICY`) vs. `pitchpilot_test_app`
+(non-owner, `NOBYPASSRLS`, the role `db_session`/`client`/`second_client`
+actually run queries through) mirrors the intended production split
+(`postgres` admin vs. a future `pitchpilot_app` runtime role, authored
+but not applied — see migration `b2b5b3f0c716`). Switching `db_session`
+to the restricted role means every existing Checkpoint 2 ownership test
+now implicitly doubles as an RLS enforcement test, confirmed by the full
+suite passing unchanged (44 passed) after the switch.
+
+**Status:** Decided and implemented for `leads` only. Explicitly flagged
+as a defense-in-depth measure against application-code bugs, not a
+security boundary against SQL injection/arbitrary SQL execution, and not
+extended to `users`/`sessions`. The production-side role
+(`pitchpilot_app`) and migration (`b2b5b3f0c716`) are authored for
+review only — nothing has been applied to production.
+
+---
+
+## Mutating routes read server-generated columns from the same transaction that writes them, not a post-commit refresh
+
+**Decision:** `create_lead`/`update_lead`/`archive_lead` (`app/api/v1/leads.py`) no longer call `db.refresh(lead)` after `db.commit()`. `app/database.py`'s `get_db()` session factory now sets `expire_on_commit=False`. Together these mean: everything the response needs (`id`, `created_at`, `updated_at`) is populated into the ORM object *before* commit ends the transaction, and nothing in the request queries the database again afterward.
+
+**The bug this replaces, found by a Checkpoint 3 security review:** `set_rls_user_context` sets `app.current_user_id` via `set_config(..., true)` — deliberately transaction-scoped (see the RLS entry above). `db.commit()` ends that transaction, which clears the GUC. The old code then called `db.refresh(lead)`, which issues a fresh `SELECT` in a brand-new transaction — one where the GUC has reverted to `''` (Postgres's actual behavior here, not textbook `NULL` — see the RLS entry above), and the `leads_owner_isolation` policy's `::uuid` cast on `''` raises `DataError`. Confirmed empirically with a session built the same way `get_db()` actually builds one (bound directly to the Engine, no externally pre-opened transaction) against the real restricted role and policy. This was latent in production (which still connects as the RLS-bypassing `postgres` role) but would have broken every create/update/archive request the moment that changes.
+
+**Why this fix, not "re-set the GUC after every commit":** re-setting the GUC after each commit treats the symptom at every call site that happens to commit-then-query — easy to forget on a future route, and it still spends two round-trip transactions on what's conceptually one atomic operation. The chosen fix removes the need for a post-commit query at all, which is correct independently of RLS: `created_at` (`server_default=func.now()`) and `updated_at` (`server_default=func.now()`, `onupdate=func.now()`) are server-evaluated SQL expressions, and SQLAlchemy (on backends that support `RETURNING`, which Postgres/psycopg does) automatically appends `RETURNING` to the `INSERT`/`UPDATE` statement it issues during `commit()`'s internal flush — *before* the transaction ends — and populates those values onto the Python object directly from that result. `db.refresh()` was always redundant for this, not just dangerous under RLS.
+
+**Why `expire_on_commit=False` is also necessary, not just removing `refresh()`:** SQLAlchemy's Session default (`expire_on_commit=True`) expires every loaded attribute on commit, so the *next* attribute access — even an ordinary one, like FastAPI/Pydantic reading `lead.company_name` to build the `LeadRead` response — triggers an implicit lazy-reload `SELECT`, in a new transaction, with no code visibly "forgetting" a refresh. Removing the explicit `db.refresh()` call alone would not have fixed the bug; the implicit one SQLAlchemy inserts on your behalf would still have hit it. Since each FastAPI request gets its own freshly-created `Session` (`get_db()` builds one per request, never reused across requests), `expire_on_commit=False` carries none of the cross-request staleness risk it would have in a long-lived session — the object is simply correct for the remaining lifetime of this one request/response cycle.
+
+**`get_db()` also gained an explicit `except Exception: db.rollback(); raise`** before its existing `finally: db.close()`. `Session.close()` already rolls back an uncommitted transaction on its own, so this isn't strictly new protection — it's made explicit so the rollback-on-error guarantee is visible in the code itself rather than relying on a reader knowing `close()`'s implicit behavior, and so a failed `commit()` can never leave a request's error response paired with partially-applied data: by the time any exception propagates out of a route, either nothing was committed (rolled back) or the commit had already fully succeeded before the exception point — and after this fix, nothing in these routes can fail *after* a successful commit, because nothing runs a query after it anymore.
+
+**Why `app/core/sessions.py`'s identical-looking `db.commit(); db.refresh()` pattern (`create_session`, `revoke_session`) was deliberately left unchanged:** `users` and `sessions` have no RLS policy (by the original Checkpoint 3 scope decision — only `leads` is RLS-protected), so there is no GUC for a post-commit query on those tables to collide with. Changing them wasn't part of this bug and was out of scope for a minimal, targeted fix — but if `users`/`sessions` are ever given RLS policies in the future, this same class of bug would need the same fix applied there.
+
+**Verified by regression tests using a production-faithful session lifecycle** (`backend/tests/test_rls_commit_regression.py`) — deliberately *not* using the existing `db_session`/`client` fixtures, which bind to an already-open external transaction and make `db.commit()` a no-op at the database level (masking this exact bug, which is how the original Checkpoint 3 suite passed 44/44 despite the bug being present). See that file's module docstring for the fixture design. Full backend suite re-run clean afterward — see `HANDOFF.md`.
+
+**Status:** Fixed and verified against the real restricted role (`pitchpilot_test_app`) and the real `leads_owner_isolation` policy. Production is unaffected either way (still connects as `postgres`, which bypasses RLS) until the still-pending, separately-scoped role/connection switch happens — this fix removes what would otherwise have been a guaranteed outage at that point.

@@ -26,6 +26,15 @@ def test_create_lead_success(client, lead_payload):
     assert body["updated_at"]
 
 
+def test_create_lead_notes_at_max_length_persists(client, lead_payload):
+    payload = {**lead_payload, "notes": "x" * 5000}
+
+    response = client.post("/api/v1/leads", json=payload)
+
+    assert response.status_code == 201
+    assert len(response.json()["notes"]) == 5000
+
+
 def test_list_leads_and_pagination(client, lead_payload):
     for _ in range(3):
         payload = {**lead_payload, "company_name": f"Company {uuid.uuid4().hex[:8]}"}

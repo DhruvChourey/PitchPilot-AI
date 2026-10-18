@@ -55,6 +55,14 @@ def test_create_lead_invalid_status(mock_client, lead_payload):
     assert response.status_code == 422
 
 
+def test_create_lead_notes_too_long(mock_client, lead_payload):
+    payload = {**lead_payload, "notes": "x" * 5001}
+
+    response = mock_client.post("/api/v1/leads", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_update_lead_rejects_explicit_null_company_name(mock_client):
     # No real lead needs to exist: Pydantic rejects the payload before the
     # endpoint would ever look up lead_id.

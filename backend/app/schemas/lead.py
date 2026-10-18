@@ -13,7 +13,7 @@ class LeadBase(BaseModel):
     contact_name: str | None = Field(default=None, max_length=255)
     contact_email: EmailStr | None = None
     source: str | None = Field(default=None, max_length=100)
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=5000)
 
     @field_validator("company_name")
     @classmethod
@@ -39,7 +39,7 @@ class LeadUpdate(BaseModel):
     contact_name: str | None = Field(default=None, max_length=255)
     contact_email: EmailStr | None = None
     source: str | None = Field(default=None, max_length=100)
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=5000)
     status: LeadStatus | None = None
 
     @field_validator("company_name")

@@ -46,8 +46,8 @@ export default function BackendStatus() {
 
   if (status === "loading") {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-zinc-400" />
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-text-muted">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-text-faint" />
         Checking backend connection...
       </div>
     );
@@ -55,12 +55,12 @@ export default function BackendStatus() {
 
   if (status === "error") {
     return (
-      <div className="flex flex-col gap-1 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+      <div className="flex flex-col gap-1 rounded-lg border border-danger/30 bg-danger-soft/40 px-4 py-3 text-sm text-red-300">
         <div className="flex items-center gap-2 font-medium">
-          <span className="h-2 w-2 rounded-full bg-red-500" />
+          <span className="h-2 w-2 rounded-full bg-danger" />
           Backend unavailable
         </div>
-        <p className="text-red-600 dark:text-red-400">
+        <p className="text-red-300/80">
           Could not reach {API_BASE_URL}/health. Make sure the backend is running
           ({errorMessage}).
         </p>
@@ -69,8 +69,8 @@ export default function BackendStatus() {
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300">
-      <span className="h-2 w-2 rounded-full bg-green-500" />
+    <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success-soft/40 px-4 py-3 text-sm text-emerald-300">
+      <span className="h-2 w-2 rounded-full bg-success" />
       Connected to {health?.service} ({health?.status})
     </div>
   );
