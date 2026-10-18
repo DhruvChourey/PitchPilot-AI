@@ -38,7 +38,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import app.database as database_module
+from app.config import settings
 from app.main import app
+
+_TRUSTED_TEST_ORIGIN = settings.cors_origins_list[0]
+
+
+def _new_client() -> TestClient:
+    client = TestClient(app)
+    client.headers["origin"] = _TRUSTED_TEST_ORIGIN
+    return client
 
 
 @pytest.fixture()
@@ -55,15 +64,25 @@ def production_like_client(test_app_engine, test_engine, monkeypatch):
     created_emails: list[str] = []
 
     def register_and_login(client: TestClient, password: str = "test-password-1") -> str:
+        preauth = client.get("/api/v1/auth/csrf-token")
+        assert preauth.status_code == 204, preauth.text
+        preauth_token = client.cookies.get(settings.preauth_csrf_cookie_name)
+        assert preauth_token
+        client.headers[settings.csrf_header_name] = preauth_token
+
         email = f"prodlike-{uuid.uuid4().hex[:10]}@example.com"
         created_emails.append(email)
         r = client.post("/api/v1/auth/register", json={"email": email, "password": password})
         assert r.status_code == 201, r.text
         r = client.post("/api/v1/auth/login", json={"email": email, "password": password})
         assert r.status_code == 200, r.text
+
+        session_csrf_token = client.cookies.get(settings.csrf_cookie_name)
+        assert session_csrf_token
+        client.headers[settings.csrf_header_name] = session_csrf_token
         return email
 
-    client = TestClient(app)
+    client = _new_client()
     client.register_and_login = register_and_login  # type: ignore[attr-defined]
 
     with client:
@@ -157,8 +176,8 @@ def test_cross_user_isolation_holds_with_real_commit_and_rls(production_like_cli
     cover, but under a session lifecycle where commits are real and the
     RLS policy is the only thing (besides app-level filtering) standing
     between user B and user A's data for the mutating routes themselves."""
-    user_a = TestClient(app)
-    user_b = TestClient(app)
+    user_a = _new_client()
+    user_b = _new_client()
     with user_a, user_b:
         production_like_client.register_and_login(user_a)
         production_like_client.register_and_login(user_b)

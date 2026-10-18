@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     # back as a header on mutating requests; see DECISIONS.md.
     csrf_cookie_name: str = "csrf_token"
     csrf_header_name: str = "X-CSRF-Token"
+    # Separate cookie for the pre-authentication (login/register) CSRF
+    # flow -- deliberately not the same cookie as the authenticated,
+    # session-bound one (different signing input, different lifecycle).
+    preauth_csrf_cookie_name: str = "csrf_preauth"
+
+    # Signs both CSRF token flavors (see app/core/csrf.py). No default --
+    # the app must fail loudly at first use if this isn't configured,
+    # the same way database_url being unset fails loudly rather than
+    # silently running with a guessable/empty key.
+    secret_key: str | None = None
 
     @property
     def cors_origins_list(self) -> list[str]:

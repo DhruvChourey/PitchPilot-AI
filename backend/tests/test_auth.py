@@ -11,12 +11,16 @@ naturally without any extra plumbing.
 
 import uuid
 
+from app.config import settings
+from tests.conftest import fetch_preauth_csrf_token
+
 
 def _unique_email() -> str:
     return f"user-{uuid.uuid4().hex[:10]}@example.com"
 
 
 def test_register_success(client):
+    fetch_preauth_csrf_token(client)
     email = _unique_email()
     response = client.post("/api/v1/auth/register", json={"email": email, "password": "correct-horse-1"})
 
@@ -30,15 +34,18 @@ def test_register_success(client):
 
 
 def test_register_duplicate_email(client):
+    fetch_preauth_csrf_token(client)
     email = _unique_email()
     client.post("/api/v1/auth/register", json={"email": email, "password": "correct-horse-1"})
 
+    fetch_preauth_csrf_token(client)
     response = client.post("/api/v1/auth/register", json={"email": email, "password": "another-password-1"})
 
     assert response.status_code == 409
 
 
 def test_register_password_too_short(client):
+    fetch_preauth_csrf_token(client)
     response = client.post(
         "/api/v1/auth/register", json={"email": _unique_email(), "password": "short"}
     )
@@ -49,8 +56,10 @@ def test_register_password_too_short(client):
 def test_login_success_sets_cookies(client):
     email = _unique_email()
     password = "correct-horse-1"
+    fetch_preauth_csrf_token(client)
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
 
+    fetch_preauth_csrf_token(client)
     response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
 
     assert response.status_code == 200
@@ -70,8 +79,10 @@ def test_login_success_sets_cookies(client):
 
 def test_login_wrong_password(client):
     email = _unique_email()
+    fetch_preauth_csrf_token(client)
     client.post("/api/v1/auth/register", json={"email": email, "password": "correct-horse-1"})
 
+    fetch_preauth_csrf_token(client)
     response = client.post("/api/v1/auth/login", json={"email": email, "password": "wrong-password"})
 
     assert response.status_code == 401
@@ -79,6 +90,7 @@ def test_login_wrong_password(client):
 
 
 def test_login_nonexistent_email_same_generic_message(client):
+    fetch_preauth_csrf_token(client)
     response = client.post(
         "/api/v1/auth/login", json={"email": _unique_email(), "password": "whatever-1"}
     )
@@ -101,8 +113,11 @@ def test_me_requires_valid_session(client):
 def test_me_returns_current_user_after_login(client):
     email = _unique_email()
     password = "correct-horse-1"
+    fetch_preauth_csrf_token(client)
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
-    client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    fetch_preauth_csrf_token(client)
+    login_response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert login_response.status_code == 200, login_response.text
 
     response = client.get("/api/v1/auth/me")
 
@@ -111,13 +126,16 @@ def test_me_returns_current_user_after_login(client):
 
 
 def test_logout_revokes_session(client):
-    # CSRF enforcement is deferred to its own checkpoint -- logout is
-    # intentionally callable with just the session cookie for now, no
-    # X-CSRF-Token header required yet.
+    # Checkpoint 4: logout now requires the session-bound CSRF token too
+    # (the `client` fixture's own login already set the matching header).
     email = _unique_email()
     password = "correct-horse-1"
+    fetch_preauth_csrf_token(client)
     client.post("/api/v1/auth/register", json={"email": email, "password": password})
-    client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    fetch_preauth_csrf_token(client)
+    login_response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert login_response.status_code == 200, login_response.text
+    client.headers[settings.csrf_header_name] = client.cookies[settings.csrf_cookie_name]
 
     logout_response = client.post("/api/v1/auth/logout")
     assert logout_response.status_code == 200

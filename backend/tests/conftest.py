@@ -7,10 +7,27 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
+from app.core.rate_limit import reset_all_rate_limits
 from app.database import Base, get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, verify_csrf_authenticated
 from app.main import app
 from app.models.user import User
+
+# Every test client needs an Origin header matching the configured trusted
+# origin -- verify_csrf_* rejects requests with neither Origin nor Referer
+# (see dependencies.py), and TestClient sends neither by default. This
+# simulates a real same-origin frontend request, not a bypass.
+_TRUSTED_TEST_ORIGIN = settings.cors_origins_list[0]
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Each test starts with empty rate-limit buckets -- otherwise tests
+    that register/login multiple times would eventually trip a limit
+    that's only meant to catch abuse within a single test's own run, not
+    leak state across the whole suite."""
+    reset_all_rate_limits()
+    yield
 
 
 TEST_SCHEMA = "pitchpilot_test"
@@ -133,13 +150,36 @@ def _make_test_client(db_session) -> TestClient:
             pass
 
     app.dependency_overrides[get_db] = override_get_db
-    return TestClient(app)
+    test_client = TestClient(app)
+    test_client.headers["origin"] = _TRUSTED_TEST_ORIGIN
+    return test_client
+
+
+def fetch_preauth_csrf_token(test_client: TestClient) -> str:
+    """Fetches a fresh pre-authentication CSRF token and sets it as the
+    client's default header -- needed before any register/login call,
+    including a second one on an already-authenticated client (login
+    deletes the pre-auth cookie once a session exists, so it won't still
+    be sitting in the cookie jar from an earlier login)."""
+    response = test_client.get("/api/v1/auth/csrf-token")
+    assert response.status_code == 204, response.text
+    token = test_client.cookies.get(settings.preauth_csrf_cookie_name)
+    assert token
+    test_client.headers[settings.csrf_header_name] = token
+    return token
 
 
 def _register_and_login(test_client: TestClient, password: str = "test-password-1") -> str:
     """Registers a fresh user and logs in on this TestClient instance (its
     cookie jar then holds that user's session). Returns the email, in case
-    a test wants it."""
+    a test wants it.
+
+    Handles both CSRF flavors the way a real frontend would: fetch the
+    pre-auth token first and echo it for register/login, then switch to
+    the session-bound token (set by login's response) for anything
+    mutating afterward."""
+    fetch_preauth_csrf_token(test_client)
+
     email = f"user-{uuid.uuid4().hex[:10]}@example.com"
     register_response = test_client.post(
         "/api/v1/auth/register", json={"email": email, "password": password}
@@ -149,6 +189,10 @@ def _register_and_login(test_client: TestClient, password: str = "test-password-
         "/api/v1/auth/login", json={"email": email, "password": password}
     )
     assert login_response.status_code == 200, login_response.text
+
+    session_csrf_token = test_client.cookies.get(settings.csrf_cookie_name)
+    assert session_csrf_token
+    test_client.headers[settings.csrf_header_name] = session_csrf_token
     return email
 
 
@@ -207,6 +251,10 @@ def mock_client():
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
+    # These tests are about request-body validation (422), not CSRF -- see
+    # this file's own module docstring. Bypass CSRF entirely so a missing
+    # token/session doesn't shadow the 422 these tests assert on.
+    app.dependency_overrides[verify_csrf_authenticated] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

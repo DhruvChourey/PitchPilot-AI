@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, verify_csrf_authenticated
 from app.models.lead import Lead, LeadStatus
 from app.models.user import User
 from app.schemas.lead import LeadCreate, LeadList, LeadRead, LeadUpdate
@@ -24,7 +24,10 @@ def _get_owned_lead_or_404(db: Session, lead_id: uuid.UUID, owner_id: uuid.UUID)
     return lead
 
 
-@router.post("", response_model=LeadRead, status_code=http_status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=LeadRead, status_code=http_status.HTTP_201_CREATED,
+    dependencies=[Depends(verify_csrf_authenticated)],
+)
 def create_lead(
     payload: LeadCreate,
     db: Session = Depends(get_db),
@@ -85,7 +88,7 @@ def get_lead(
     return _get_owned_lead_or_404(db, lead_id, current_user.id)
 
 
-@router.patch("/{lead_id}", response_model=LeadRead)
+@router.patch("/{lead_id}", response_model=LeadRead, dependencies=[Depends(verify_csrf_authenticated)])
 def update_lead(
     lead_id: uuid.UUID,
     payload: LeadUpdate,
@@ -108,7 +111,7 @@ def update_lead(
     return lead
 
 
-@router.delete("/{lead_id}", response_model=LeadRead)
+@router.delete("/{lead_id}", response_model=LeadRead, dependencies=[Depends(verify_csrf_authenticated)])
 def archive_lead(
     lead_id: uuid.UUID,
     db: Session = Depends(get_db),

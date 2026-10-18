@@ -456,3 +456,42 @@ review only — nothing has been applied to production.
 **Verified by regression tests using a production-faithful session lifecycle** (`backend/tests/test_rls_commit_regression.py`) — deliberately *not* using the existing `db_session`/`client` fixtures, which bind to an already-open external transaction and make `db.commit()` a no-op at the database level (masking this exact bug, which is how the original Checkpoint 3 suite passed 44/44 despite the bug being present). See that file's module docstring for the fixture design. Full backend suite re-run clean afterward — see `HANDOFF.md`.
 
 **Status:** Fixed and verified against the real restricted role (`pitchpilot_test_app`) and the real `leads_owner_isolation` policy. Production is unaffected either way (still connects as `postgres`, which bypasses RLS) until the still-pending, separately-scoped role/connection switch happens — this fix removes what would otherwise have been a guaranteed outage at that point.
+
+---
+
+## Checkpoint 4 — CSRF: two differently-signed tokens, not one plain double-submit value
+
+**Decision:** replaced the original placeholder (`app/core/csrf.py`'s `generate_csrf_token()` — an unsigned random string, compared only for cookie==header equality) with two distinct, HMAC-signed token flavors:
+
+1. **Session-bound** (`sign_session_csrf_token`/`verify_session_csrf_token`): `hex(HMAC(SECRET_KEY, "session:" + session.hashed_token))`. No stored nonce — it's deterministically derived from the session's own `hashed_token` (already stored on `UserSession`, never the raw cookie value). Used for every authenticated mutating request: lead create/update/archive, logout.
+2. **Pre-authentication** (`generate_preauth_csrf_token`/`verify_preauth_csrf_token`): `nonce.hex(HMAC(SECRET_KEY, "preauth:" + nonce))`, issued by a dedicated `GET /api/v1/auth/csrf-token` endpoint. Used for register/login, which run before any session exists.
+
+**Why signed, not plain equality:** SameSite=Lax already blocks the session cookie from riding along on a cross-site fetch/XHR/form submission — the usual CSRF vector. The gap a plain double-submit token doesn't close is *cookie-tossing*: an attacker who controls a sibling or compromised subdomain of the same parent domain can often **set** (though not read) a cookie on that parent domain, even with SameSite=Lax in place. If the token were just a random value checked only for cookie==header equality, the attacker could toss a cookie of their own choosing and — separately, e.g. via a crafted same-site-permitted request — try to get that same chosen value echoed as the header, no server secret required. Signing with a server-only `SECRET_KEY` means the attacker can toss *a* cookie value but can't produce one that verifies, because they can't compute the HMAC.
+
+**Why the session-bound flavor doesn't need a stored nonce, but the pre-auth one does:** after login there's already a per-session secret to bind to (`hashed_token`, unknown to anyone without the session's raw cookie). Before login there's no such secret yet, so the pre-auth token needs its own randomness (the nonce), with the signature only proving the *nonce* wasn't tampered with — the nonce itself still has to travel in the cookie, same shape as the original design, just now signed.
+
+**Token lifecycle (resolved before implementing, per your request):**
+- Pre-auth cookie: issued by `GET /api/v1/auth/csrf-token`, and *only* if the request doesn't already carry a valid one — this endpoint never regenerates an already-good cookie on every call (verified by `test_csrf_token_endpoint_does_not_regenerate_an_existing_valid_cookie`). It's a dedicated endpoint, not a blanket "seed on every response" middleware, so the cookie is set only where it's actually needed (before showing a login/register form) rather than on `/health`, lead routes, etc.
+- Session-bound cookie: set directly by `login()` (`_set_session_csrf_cookie`), computed from the *new* session's `hashed_token`. This is also how rotation happens — a second login (new session, new `hashed_token`) always produces a different derived value, with no separate token store or explicit "rotate" step to remember; confirmed by `test_csrf_token_rotates_on_login`.
+- On successful login, the pre-auth cookie is explicitly deleted (`response.delete_cookie`) — its job is done, and leaving it around risks it being mistaken for the (differently-signed) session-bound token.
+- On logout, both the session cookie and the session-bound CSRF cookie are deleted, same as before.
+
+**Origin/Referer policy:** `_verify_trusted_origin` (in `app/dependencies.py`) checks `Origin` against the exact configured `cors_origins_list` (no wildcard, no prefix/suffix match); if `Origin` is absent, falls back to `Referer`'s origin; if **both** are absent, the request is rejected. Chosen deliberately: a real browser performing a cookie-carrying fetch/XHR/form submission always sends at least one of these, so their total absence is itself the anomaly, not a case worth accommodating. Never trusts `X-Forwarded-*` — those headers are client-settable, and no reverse-proxy topology is known/configured for this project yet (flagged as an open deployment question in `HANDOFF.md`).
+
+**Enforcement scope:** `verify_csrf_authenticated` is applied to `leads.py`'s POST/PATCH/DELETE and to `auth.py`'s `logout` (your explicit decision — consistent enforcement over exempting logout as "low severity"). `verify_csrf_preauth` is applied to `register` and `login`.
+
+**Status:** Implemented and enforced everywhere decided above. Not implemented: frontend integration (calling `GET /auth/csrf-token` before rendering the login/register form, reading/echoing the header on fetch calls) — explicitly out of scope for this checkpoint, deferred to Checkpoint 5.
+
+---
+
+## Checkpoint 4 — rate limiting: hand-rolled, in-memory, explicitly not multi-instance-safe
+
+**Decision:** added `app/core/rate_limit.py` — a small, dependency-free sliding-window limiter, rather than pulling in `slowapi`/`limits`. Reasoning: nothing comparable already exists in the stack (checked `pyproject.toml` first, per your instruction to inspect dependencies before adding new ones), the logic needed is genuinely small, and a hand-rolled limiter is trivial to make deterministically testable — each `RateLimiter` exposes a `.clock` attribute tests monkeypatch directly, so rate-limit tests advance a fake clock instead of sleeping through real windows.
+
+**Keying — dual, independent limits, never an account lock:** every login/register request is checked against **two** separate buckets: per-IP (`request.client.host` — Starlette/uvicorn's own view of the peer, never `X-Forwarded-For` or similar, which this project doesn't trust without a known, configured proxy in front of it) and per-normalized-email (`.strip().lower()`, then SHA-256-hashed before use as the bucket key — the raw email is never stored in the limiter's own state, so a debug-time dump of it can't leak submitted addresses). Both are time-windowed throttles returning `429` + `Retry-After`; neither sets any persisted "locked" flag on the account. This matters specifically because a persisted lock keyed by email would be an attacker-triggerable DoS on a victim: repeatedly fail that victim's login a few times and they're locked out too. Throttling (which self-resets) doesn't have that failure mode.
+
+Current thresholds: login — 10/minute per IP, 5/5 minutes per email; register — 5/minute per IP, 3/5 minutes per email. Chosen as a starting point generous enough not to block normal shared-IP usage (office NAT, etc.) while still bounding automated abuse; easy to retune later from this file alone.
+
+**Known, accepted-for-now limitation — NOT claimed to be production-sufficient:** this state is a plain in-process dict. Running more than one backend instance means each instance enforces independent counters — an attacker spread across N instances effectively gets `limit × N`. A shared backend (Redis, via a `limits`-style `redis://` storage, or equivalent) is required before horizontal scaling becomes safe. Not implemented here because no such infrastructure is provisioned for this project yet; this is a deployment prerequisite to resolve before going multi-instance, not an oversight.
+
+**Status:** Implemented for login/register only, as scoped. Deterministic tests cover per-IP threshold/429, per-email threshold/429, independence between the two keys, and window-reset-without-permanent-lockout behavior — see `backend/tests/test_rate_limit.py`.

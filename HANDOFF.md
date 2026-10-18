@@ -1,6 +1,6 @@
 # Handoff — Current Verified State
 
-**As of:** 2026-10-18 (updated after fixing the Checkpoint 3 RLS/commit bug found by the 2026-10-17 security review)
+**As of:** 2026-10-18 (updated after implementing Checkpoint 4 — CSRF protection and auth rate limiting)
 **Repository:** `D:\leadtoclients\`
 
 This document separates four categories of information:
@@ -122,6 +122,45 @@ Each route below was actually opened in a real browser (Claude in Chrome) agains
 - **RLS is enabled on `public.leads` with zero policies.** This is intentionally minimal — it denies all access to non-owner roles (`anon`, `authenticated`, `service_role`) by default, without needing to define any policy. Do not casually add RLS policies, change the existing grants, enable `FORCE ROW LEVEL SECURITY`, or change Supabase API settings without a separate, explicit review — each of those has different blast-radius implications that haven't been evaluated.
 - **The backend connects as `postgres`, the table owner, which bypasses RLS by default** (confirmed via a live INSERT/SELECT sanity check after the RLS migration was applied, in the prior session). This means RLS currently protects against the Data API / other non-`postgres` connections, but does **not** provide any application-level authorization — the FastAPI backend's own endpoints have no auth/authorization layer at all yet. Do not treat RLS as a substitute for that.
 - **Never include credentials or secrets in documentation, commit messages, or chat.** Refer to environment variable names only (`DATABASE_URL`, `TEST_DATABASE_URL`, `BACKEND_CORS_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`) — never their values. This document contains none.
+
+## Authentication — Checkpoint 4 of 6 (CSRF protection, auth rate limiting) (2026-10-18)
+
+Implemented per your approved plan and decisions. No migrations executed, no production roles/grants/settings/data touched, no secrets printed (a local `SECRET_KEY` was generated and appended directly to `backend/.env`, never displayed; `.env.example` got a placeholder only). Nothing staged, committed, or pushed.
+
+**CSRF — two signed token flavors, both enforced (see `DECISIONS.md` for full design reasoning):**
+- **Session-bound** (`app/core/csrf.py: sign_session_csrf_token`/`verify_session_csrf_token`): `hex(HMAC(SECRET_KEY, "session:" + session.hashed_token))` — no stored nonce, deterministically tied to the session row. Enforced via `verify_csrf_authenticated` (`app/dependencies.py`) on `leads.py`'s `create_lead`/`update_lead`/`archive_lead` and on `auth.py`'s `logout` (your explicit decision to enforce logout too, not exempt it).
+- **Pre-authentication** (`generate_preauth_csrf_token`/`verify_preauth_csrf_token`): `nonce.hex(HMAC(SECRET_KEY, "preauth:" + nonce))`, issued only by the new `GET /api/v1/auth/csrf-token` endpoint, and only when the request doesn't already carry a valid one (never regenerated on every call — verified by test). Enforced via `verify_csrf_preauth` on `register` and `login`.
+- **Origin/Referer policy** (`_verify_trusted_origin`): exact match against `settings.cors_origins_list` only (no wildcard/prefix matching); falls back to `Referer`'s origin if `Origin` is absent; rejects if **both** are absent. Never trusts `X-Forwarded-*`.
+- **Lifecycle:** login (`_set_session_cookie`/`_set_session_csrf_cookie` in `auth.py`) sets the session cookie and derives+sets the session-bound CSRF cookie from the *new* session, which is also how rotation happens (new session → new `hashed_token` → new derived value, no separate bookkeeping) — then deletes the now-unneeded pre-auth cookie. Logout deletes both the session and session-bound CSRF cookies (unchanged from before, still correct).
+- **Files changed:** `backend/app/core/csrf.py` (rewritten — signing, not plain equality), `backend/app/dependencies.py` (`verify_csrf_authenticated`, `verify_csrf_preauth`, `_verify_trusted_origin` replacing the old unused `verify_csrf`), `backend/app/api/v1/auth.py` (cookie-setting split into `_set_session_cookie`/`_set_session_csrf_cookie`, new `GET /csrf-token` endpoint, CSRF `Depends` added to `register`/`login`/`logout`), `backend/app/api/v1/leads.py` (CSRF `Depends` added to the three mutating routes), `backend/app/config.py` (`secret_key`, `preauth_csrf_cookie_name`).
+
+**Rate limiting — hand-rolled, in-memory, deterministically tested (see `DECISIONS.md` for why no new dependency was added):**
+- `backend/app/core/rate_limit.py` — a small sliding-window `RateLimiter` with an injectable `.clock`. Independent per-IP and per-normalized-email (SHA-256-hashed before use as a key — raw emails are never stored or logged) buckets for both `login` and `register`, called directly from inside those two route functions (`enforce_login_rate_limit`/`enforce_register_rate_limit`) rather than as FastAPI dependencies, to avoid a duplicate-body-parsing conflict.
+- Thresholds: login 10/min per IP, 5/5min per email; register 5/min per IP, 3/5min per email. Returns `429` + a `Retry-After` header. Never sets any persisted account-lock state — a throttle only, specifically so an attacker can't use it to lock out a victim's account.
+- **Explicitly documented limitation, not glossed over:** in-memory state is per-process. Multiple backend instances would each enforce independent counters (`limit × instance_count` effective ceiling for a distributed attacker) — a shared backend (Redis or equivalent) is required before horizontal scaling, and isn't implemented since no such infrastructure exists for this project yet.
+- **Files changed:** `backend/app/core/rate_limit.py` (new), `backend/app/api/v1/auth.py` (calls added to `register`/`login`).
+
+**Test changes required by enforcement going live (expected, not a scope creep — every mutating route now needs a valid CSRF pair, so every existing test touching one needed updating):**
+- `backend/tests/conftest.py`: new autouse `_reset_rate_limits` fixture (clears all rate-limit buckets before each test, since the limiters are module-level singletons shared across the whole suite); `_TRUSTED_TEST_ORIGIN` constant and `_make_test_client` now sets a default `Origin` header on every test client (simulating a real same-origin frontend — TestClient sends neither Origin nor Referer by default, which the new policy would otherwise reject); new `fetch_preauth_csrf_token()` helper; `_register_and_login()` updated to fetch the pre-auth token first, then switch to the session-bound token after login succeeds; `mock_client` now also overrides `verify_csrf_authenticated` to a no-op (that fixture's tests are about body-validation 422s, not CSRF — see that file's own docstring).
+- `backend/tests/test_auth.py`: tests that call `register`/`login` directly on the already-authenticated `client` fixture now fetch a fresh pre-auth token first (the fixture's own login already consumed/deleted the original one) and update the CSRF header after a successful login before the next mutating call (`logout`).
+- `backend/tests/test_rls_commit_regression.py`: `production_like_client`'s `register_and_login` helper and the standalone `TestClient` instances in the cross-user-isolation test gained the same Origin header + pre-auth/session-bound CSRF handling.
+
+**New tests:**
+- `backend/tests/test_csrf.py` (19 tests) — missing/mismatched/tampered/valid CSRF cookie+header on lead create/update/archive and on logout; token rotation on a second login; missing/mismatched/valid Origin, Origin-absent-with-valid-and-invalid-Referer; register/login rejected with no pre-auth token, with a tampered one, accepted with a valid one; the pre-auth endpoint not regenerating an already-valid cookie.
+- `backend/tests/test_rate_limit.py` (7 tests) — per-IP 429 at threshold, per-email 429 at threshold (independent of the IP limit), distinct-key behavior (exhausting one email's limit doesn't affect another), window-reset-without-lockout (advancing the fake clock past the window un-blocks the same IP/email), same three properties for register, and a direct check that the limiter's internal keys never contain a raw email.
+
+**Full backend suite: `uv run pytest` → 76 passed, 0 failed, 0 skipped** (50 pre-existing + 19 new CSRF tests + 7 new rate-limit tests), run fresh after implementation. Explicitly re-ran `test_rls.py` + `test_rls_commit_regression.py` + `test_lead_ownership.py` together (19/19 passed) to confirm the Checkpoint 3 RLS/commit-safety fix is still intact and unaffected by this checkpoint's changes.
+
+**Production re-verified read-only, fresh, after implementation:** `alembic_version` unchanged at `92142a5684c8`; `public.leads` — 0 rows; only the two test roles (`pitchpilot_test_runner`, `pitchpilot_test_app`) exist anywhere in the database, no `pitchpilot_app`. No migration was involved in this checkpoint at all (no schema change — CSRF/rate-limiting are pure application-layer additions).
+
+**Remaining risks / deployment limitations, carried forward:**
+1. **Frontend integration is explicitly not done** (per your scope) — the frontend doesn't yet call `GET /api/v1/auth/csrf-token` before rendering login/register, nor does it read/echo the CSRF header on mutating calls. Until that's built (Checkpoint 5), the actual Next.js frontend's own login/register/lead-mutation calls will now fail CSRF validation — this is expected and intentional, not a bug to chase.
+2. **In-memory rate limiting is not multi-instance-safe** — see `DECISIONS.md`. A shared backend (Redis or equivalent) is a prerequisite before running more than one backend instance.
+3. **IP-trust topology is unverified for the eventual production deployment** — `request.client.host` is used directly; if production ends up behind a reverse proxy/load balancer, this would see the proxy's address, not the real client, unless a specific trusted-proxy configuration is added later (deliberately not guessed at here).
+4. **The session-bound CSRF design binds to the session's `hashed_token`, not to any separate per-token secret store** — this was an explicit design decision (see `DECISIONS.md`), not a default; revisit only if a different threat model is identified.
+5. **Carried forward from Checkpoint 3, unaffected by this checkpoint:** the RLS GUC-forgery limitation, `users`/`sessions` not being RLS-protected, no production role/policy/connection switch yet, and `app/core/sessions.py`'s `db.commit()`/`db.refresh()` pattern being left as-is (still harmless, since neither table has RLS).
+
+**Exact next step:** Checkpoint 4 is complete and verified. Do not begin Checkpoint 5 (frontend integration) without your explicit go-ahead — per your instruction, stopping here.
 
 ## Fix for the Checkpoint 3 RLS/commit bug (2026-10-18)
 
